@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/mongo/client"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	pb "github.com/go-chassis/cari/discovery"
@@ -178,7 +179,7 @@ func (dr *DependencyRelation) GetServiceByMicroServiceKey(service *pb.MicroServi
 func (dr *DependencyRelation) getConsumerOfDependAllServices() ([]*pb.MicroServiceKey, error) {
 	providerService := pb.MicroServiceToKey(dr.domainProject, dr.provider)
 	providerService.ServiceName = "*"
-	filter := GenerateProviderDependencyRuleKey(dr.domainProject, dr.provider.ServiceId, providerService)
+	filter := GenerateProviderDependencyRuleKey(dr.domainProject, providerService)
 	findRes, err := client.GetMongoClient().Find(dr.ctx, CollectionDep, filter)
 	if err != nil {
 		return nil, err
@@ -204,7 +205,7 @@ func (dr *DependencyRelation) getProviderKeys() ([]*pb.MicroServiceKey, error) {
 		return nil, ErrInvalidConsumer
 	}
 	consumerMicroServiceKey := pb.MicroServiceToKey(dr.domainProject, dr.consumer)
-	filter := GenerateConsumerDependencyRuleKey(dr.domainProject, dr.consumer.ServiceId, consumerMicroServiceKey)
+	filter := GenerateConsumerDependencyRuleKey(dr.domainProject, consumerMicroServiceKey)
 	findRes, err := client.GetMongoClient().Find(dr.ctx, CollectionDep, filter)
 	if err != nil {
 		return nil, err
@@ -443,32 +444,35 @@ func ToDependencyRelationFilterOpt(opts ...DependencyRelationFilterOption) (op D
 	return
 }
 
-func GenerateConsumerDependencyRuleKey(domainProject string, serviceID string, in *pb.MicroServiceKey) bson.M {
-	return GenerateServiceDependencyRuleKey(domainProject, serviceID, in)
+func GenerateConsumerDependencyRuleKey(domainProject string, in *pb.MicroServiceKey) bson.M {
+	return GenerateServiceDependencyRuleKey(path.DepsConsumer, domainProject, in)
 }
 
-func GenerateProviderDependencyRuleKey(domainProject string, serviceID string, in *pb.MicroServiceKey) bson.M {
-	return GenerateServiceDependencyRuleKey(domainProject, serviceID, in)
+func GenerateProviderDependencyRuleKey(domainProject string, in *pb.MicroServiceKey) bson.M {
+	return GenerateServiceDependencyRuleKey(path.DepsProvider, domainProject, in)
 }
 
-func GenerateServiceDependencyRuleKey(domainProject string, serviceID string, in *pb.MicroServiceKey) bson.M {
+func GenerateServiceDependencyRuleKey(serviceType string, domainProject string, in *pb.MicroServiceKey) bson.M {
+	if serviceType == path.DepsConsumer {
+		serviceType = ColumnConsumer
+	} else {
+		serviceType = ColumnProviders
+	}
+
 	if in == nil {
 		return bson.M{
-			ColumnConsumerID: serviceID,
-			StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnTenant}): domainProject}
+			StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnTenant}): domainProject}
 	}
 	if in.ServiceName == "*" {
 		return bson.M{
-			ColumnConsumerID: serviceID,
-			StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnTenant}):      domainProject,
-			StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnEnv}):         in.Environment,
-			StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnServiceName}): in.ServiceName}
+			StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnTenant}):      domainProject,
+			StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnEnv}):         in.Environment,
+			StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnServiceName}): in.ServiceName}
 	}
 	return bson.M{
-		ColumnConsumerID: serviceID,
-		StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnTenant}):      domainProject,
-		StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnEnv}):         in.Environment,
-		StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnAppID}):       in.AppId,
-		StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnVersion}):     in.Version,
-		StringBuilder([]string{ColumnDependencyInfo, ColumnConsumer, ColumnServiceName}): in.ServiceName}
+		StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnTenant}):      domainProject,
+		StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnEnv}):         in.Environment,
+		StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnAppID}):       in.AppId,
+		StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnVersion}):     in.Version,
+		StringBuilder([]string{ColumnDependencyInfo, serviceType, ColumnServiceName}): in.ServiceName}
 }

@@ -72,6 +72,7 @@ const (
 	ColumnSchemaInfo     = "schemainfo"
 	ColumnSchemaSummary  = "schemasummary"
 	ColumnConsumer       = "consumer"
+	ColumnProviders      = "providers"
 	ColumnDependencyInfo = "dependencyinfo"
 	ColumnRuleInfo       = "ruleinfo"
 	ColumnInstanceInfo   = "instanceinfo"
