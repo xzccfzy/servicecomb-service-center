@@ -197,6 +197,8 @@ func (mc *MongoClient) Watch(ctx context.Context, Table string, pipeline interfa
 }
 
 func (mc *MongoClient) StartSession(ctx context.Context) (mongo.Session, error) {
+	//v:= append(bson.D{bson.E{"k","v"}},)
+	//append(bson.M{},bson.D{"kj":"asd"})
 	return mc.client.StartSession()
 }
 

@@ -77,6 +77,7 @@ const (
 	ColumnInstanceInfo   = "instanceinfo"
 	ColumnInstanceID     = "instanceid"
 	ColumnConsumerID     = "consumerid"
+	ColumnProviders      = "providers"
 	ColumnMongoID        = "_id"
 	ColumnTenant         = "tenant"
 )
@@ -111,10 +112,18 @@ type Instance struct {
 	InstanceInfo *pb.MicroServiceInstance
 }
 
-type Dependency struct {
-	Domain         string
-	Project        string
-	ConsumerID     string
-	UUID           string
-	DependencyInfo *pb.ConsumerDependency
+type ConsumerDep struct {
+	Domain          string
+	Project         string
+	ConsumerID      string
+	UUID            string
+	ConsumerDepInfo *pb.ConsumerDependency
+}
+
+type DependencyRule struct {
+	Type       string
+	Domain     string
+	Project    string
+	ServiceKey *pb.MicroServiceKey
+	DepInfo    *pb.MicroServiceDependency
 }

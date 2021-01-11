@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apache/servicecomb-service-center/datasource"
 	"strings"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
@@ -230,107 +231,142 @@ func toString(in *pb.MicroServiceKey) string {
 	return path.GenerateProviderDependencyRuleKey(in.Tenant, in)
 }
 
-func parseAddOrUpdateRules(ctx context.Context, dep *Dependency) (createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList []*pb.MicroServiceKey) {
+//func parseAddOrUpdateRules(ctx context.Context, dep *Dependency) (createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList []*pb.MicroServiceKey) {
+//	conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
+//
+//	oldProviderRules, err := TransferToMicroServiceDependency(ctx, conKey)
+//	if err != nil {
+//		log.Errorf(err, "update dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
+//			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
+//		return
+//	}
+//
+//	deleteDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
+//	createDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(dep.ProvidersRule))
+//	existDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
+//	for _, tmpProviderRule := range dep.ProvidersRule {
+//		if ok, _ := ContainServiceDependency(oldProviderRules.Dependency, tmpProviderRule); ok {
+//			continue
+//		}
+//
+//		if tmpProviderRule.ServiceName == "*" {
+//			createDependencyRuleList = append([]*pb.MicroServiceKey{}, tmpProviderRule)
+//			deleteDependencyRuleList = oldProviderRules.Dependency
+//			break
+//		}
+//
+//		createDependencyRuleList = append(createDependencyRuleList, tmpProviderRule)
+//		old := IsNeedUpdate(oldProviderRules.Dependency, tmpProviderRule)
+//		if old != nil {
+//			deleteDependencyRuleList = append(deleteDependencyRuleList, old)
+//		}
+//	}
+//	for _, oldProviderRule := range oldProviderRules.Dependency {
+//		if oldProviderRule.ServiceName == "*" {
+//			createDependencyRuleList = nil
+//			deleteDependencyRuleList = nil
+//			return
+//		}
+//		if ok, _ := ContainServiceDependency(deleteDependencyRuleList, oldProviderRule); !ok {
+//			existDependencyRuleList = append(existDependencyRuleList, oldProviderRule)
+//		}
+//	}
+//
+//	dep.ProvidersRule = append(createDependencyRuleList, existDependencyRuleList...)
+//	return
+//}
+//
+//func parseOverrideRules(ctx context.Context, dep *Dependency) (createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList []*pb.MicroServiceKey) {
+//	conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
+//
+//	oldProviderRules, err := TransferToMicroServiceDependency(ctx, conKey)
+//	if err != nil {
+//		log.Errorf(err, "override dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
+//			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
+//		return
+//	}
+//
+//	deleteDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
+//	createDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(dep.ProvidersRule))
+//	existDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
+//	for _, oldProviderRule := range oldProviderRules.Dependency {
+//		if ok, _ := ContainServiceDependency(dep.ProvidersRule, oldProviderRule); !ok {
+//			deleteDependencyRuleList = append(deleteDependencyRuleList, oldProviderRule)
+//		} else {
+//			existDependencyRuleList = append(existDependencyRuleList, oldProviderRule)
+//		}
+//	}
+//	for _, tmpProviderRule := range dep.ProvidersRule {
+//		if ok, _ := ContainServiceDependency(existDependencyRuleList, tmpProviderRule); !ok {
+//			createDependencyRuleList = append(createDependencyRuleList, tmpProviderRule)
+//		}
+//	}
+//	return
+//}
+//
+//func syncDependencyRule(ctx context.Context, dep *Dependency, filter func(context.Context, *Dependency) (_, _, _ []*pb.MicroServiceKey)) error {
+//	//更新consumer的providers的值,consumer的版本是确定的
+//	consumerFlag := strings.Join([]string{dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version}, "/")
+//
+//	createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList := filter(ctx, dep)
+//	if len(createDependencyRuleList) == 0 && len(existDependencyRuleList) == 0 && len(deleteDependencyRuleList) == 0 {
+//		return nil
+//	}
+//
+//	if len(deleteDependencyRuleList) != 0 {
+//		log.Infof("delete consumer[%s]'s dependency rule %v", consumerFlag, deleteDependencyRuleList)
+//		dep.DeleteDependencyRuleList = deleteDependencyRuleList
+//	}
+//
+//	if len(createDependencyRuleList) != 0 {
+//		log.Infof("create consumer[%s]'s dependency rule %v", consumerFlag, createDependencyRuleList)
+//		dep.CreateDependencyRuleList = createDependencyRuleList
+//	}
+//
+//	return dep.Commit(ctx)
+//}
+//
+func AddDependencyRule(ctx context.Context, dep *datasource.Dependency) error {
+	var err error
+	oldProviderRules, err := GetOldProviderRules(ctx, dep)
+	if err != nil {
+		log.Errorf(err, "update dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
+			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
+		return err
+	}
+	datasource.ParseOverrideRules(ctx, dep, oldProviderRules)
+	if len(dep.CreateDependencyRuleList) != 0 || len(dep.DeleteDependencyRuleList) != 0 {
+		err = CommitDep(ctx, dep)
+	}
+	return err
+	//return syncDependencyRule(ctx, dep, parseAddOrUpdateRules)
+}
+
+func CreateDependencyRule(ctx context.Context, dep *datasource.Dependency) error {
+	var err error
+	oldProviderRules, err := GetOldProviderRules(ctx, dep)
+	if err != nil {
+		log.Errorf(err, "update dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
+			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
+		return err
+	}
+	datasource.ParseAddOrUpdateRules(ctx, dep, oldProviderRules)
+	if len(dep.CreateDependencyRuleList) != 0 || len(dep.DeleteDependencyRuleList) != 0 {
+		err = CommitDep(ctx, dep)
+	}
+	return err
+}
+
+func GetOldProviderRules(ctx context.Context, dep *datasource.Dependency) (*pb.MicroServiceDependency, error) {
 	conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
 
 	oldProviderRules, err := TransferToMicroServiceDependency(ctx, conKey)
 	if err != nil {
 		log.Errorf(err, "update dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
 			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
-		return
+		return nil, err
 	}
-
-	deleteDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
-	createDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(dep.ProvidersRule))
-	existDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
-	for _, tmpProviderRule := range dep.ProvidersRule {
-		if ok, _ := ContainServiceDependency(oldProviderRules.Dependency, tmpProviderRule); ok {
-			continue
-		}
-
-		if tmpProviderRule.ServiceName == "*" {
-			createDependencyRuleList = append([]*pb.MicroServiceKey{}, tmpProviderRule)
-			deleteDependencyRuleList = oldProviderRules.Dependency
-			break
-		}
-
-		createDependencyRuleList = append(createDependencyRuleList, tmpProviderRule)
-		old := IsNeedUpdate(oldProviderRules.Dependency, tmpProviderRule)
-		if old != nil {
-			deleteDependencyRuleList = append(deleteDependencyRuleList, old)
-		}
-	}
-	for _, oldProviderRule := range oldProviderRules.Dependency {
-		if oldProviderRule.ServiceName == "*" {
-			createDependencyRuleList = nil
-			deleteDependencyRuleList = nil
-			return
-		}
-		if ok, _ := ContainServiceDependency(deleteDependencyRuleList, oldProviderRule); !ok {
-			existDependencyRuleList = append(existDependencyRuleList, oldProviderRule)
-		}
-	}
-
-	dep.ProvidersRule = append(createDependencyRuleList, existDependencyRuleList...)
-	return
-}
-
-func parseOverrideRules(ctx context.Context, dep *Dependency) (createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList []*pb.MicroServiceKey) {
-	conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
-
-	oldProviderRules, err := TransferToMicroServiceDependency(ctx, conKey)
-	if err != nil {
-		log.Errorf(err, "override dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
-			dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
-		return
-	}
-
-	deleteDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
-	createDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(dep.ProvidersRule))
-	existDependencyRuleList = make([]*pb.MicroServiceKey, 0, len(oldProviderRules.Dependency))
-	for _, oldProviderRule := range oldProviderRules.Dependency {
-		if ok, _ := ContainServiceDependency(dep.ProvidersRule, oldProviderRule); !ok {
-			deleteDependencyRuleList = append(deleteDependencyRuleList, oldProviderRule)
-		} else {
-			existDependencyRuleList = append(existDependencyRuleList, oldProviderRule)
-		}
-	}
-	for _, tmpProviderRule := range dep.ProvidersRule {
-		if ok, _ := ContainServiceDependency(existDependencyRuleList, tmpProviderRule); !ok {
-			createDependencyRuleList = append(createDependencyRuleList, tmpProviderRule)
-		}
-	}
-	return
-}
-
-func syncDependencyRule(ctx context.Context, dep *Dependency, filter func(context.Context, *Dependency) (_, _, _ []*pb.MicroServiceKey)) error {
-	//更新consumer的providers的值,consumer的版本是确定的
-	consumerFlag := strings.Join([]string{dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version}, "/")
-
-	createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList := filter(ctx, dep)
-	if len(createDependencyRuleList) == 0 && len(existDependencyRuleList) == 0 && len(deleteDependencyRuleList) == 0 {
-		return nil
-	}
-
-	if len(deleteDependencyRuleList) != 0 {
-		log.Infof("delete consumer[%s]'s dependency rule %v", consumerFlag, deleteDependencyRuleList)
-		dep.DeleteDependencyRuleList = deleteDependencyRuleList
-	}
-
-	if len(createDependencyRuleList) != 0 {
-		log.Infof("create consumer[%s]'s dependency rule %v", consumerFlag, createDependencyRuleList)
-		dep.CreateDependencyRuleList = createDependencyRuleList
-	}
-
-	return dep.Commit(ctx)
-}
-
-func AddDependencyRule(ctx context.Context, dep *Dependency) error {
-	return syncDependencyRule(ctx, dep, parseAddOrUpdateRules)
-}
-
-func CreateDependencyRule(ctx context.Context, dep *Dependency) error {
-	return syncDependencyRule(ctx, dep, parseOverrideRules)
+	return oldProviderRules, nil
 }
 
 func IsNeedUpdate(services []*pb.MicroServiceKey, service *pb.MicroServiceKey) *pb.MicroServiceKey {

@@ -19,6 +19,7 @@ package util_test
 
 import (
 	"context"
+	"github.com/apache/servicecomb-service-center/datasource"
 	"testing"
 
 	. "github.com/apache/servicecomb-service-center/datasource/etcd/util"
@@ -56,14 +57,14 @@ func TestEqualServiceDependency(t *testing.T) {
 }
 
 func TestCreateDependencyRule(t *testing.T) {
-	err := CreateDependencyRule(context.Background(), &Dependency{
+	err := CreateDependencyRule(context.Background(), &datasource.Dependency{
 		Consumer: &discovery.MicroServiceKey{},
 	})
 	if err != nil {
 		t.Fatalf(`CreateDependencyRule failed`)
 	}
 
-	err = AddDependencyRule(context.Background(), &Dependency{
+	err = AddDependencyRule(context.Background(), &datasource.Dependency{
 		Consumer: &discovery.MicroServiceKey{},
 	})
 	if err != nil {
@@ -194,7 +195,7 @@ func TestUpdateServiceForAddDependency(t *testing.T) {
 }
 
 func TestDependency(t *testing.T) {
-	d := &Dependency{
+	d := &datasource.Dependency{
 		DeleteDependencyRuleList: []*discovery.MicroServiceKey{
 			{ServiceName: "b", Version: "1.0.0"},
 		},
@@ -202,7 +203,7 @@ func TestDependency(t *testing.T) {
 			{ServiceName: "a", Version: "1.0.0"},
 		},
 	}
-	err := d.Commit(context.Background())
+	err := CommitDep(context.Background(), d)
 	if err != nil {
 		t.Fatalf(`Dependency_UpdateProvidersRuleOfConsumer failed`)
 	}

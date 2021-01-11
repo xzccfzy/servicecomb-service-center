@@ -20,6 +20,7 @@ package util
 import (
 	"context"
 	"encoding/json"
+	"github.com/apache/servicecomb-service-center/datasource"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 
@@ -28,18 +29,18 @@ import (
 	"github.com/go-chassis/cari/discovery"
 )
 
-// Dependency contains dependency rules
-type Dependency struct {
-	DomainProject string
-	// store the consumer Dependency from dep-queue object
-	Consumer      *discovery.MicroServiceKey
-	ProvidersRule []*discovery.MicroServiceKey
-	// store the parsed rules from Dependency object
-	DeleteDependencyRuleList []*discovery.MicroServiceKey
-	CreateDependencyRuleList []*discovery.MicroServiceKey
-}
+//// Dependency contains dependency rules
+//type Dependency struct {
+//	DomainProject string
+//	// store the consumer Dependency from dep-queue object
+//	Consumer      *discovery.MicroServiceKey
+//	ProvidersRule []*discovery.MicroServiceKey
+//	// store the parsed rules from Dependency object
+//	DeleteDependencyRuleList []*discovery.MicroServiceKey
+//	CreateDependencyRuleList []*discovery.MicroServiceKey
+//}
 
-func (dep *Dependency) removeConsumerOfProviderRule(ctx context.Context) ([]client.PluginOp, error) {
+func removeConsumerOfProviderRule(ctx context.Context, dep *datasource.Dependency) ([]client.PluginOp, error) {
 	opts := make([]client.PluginOp, 0, len(dep.DeleteDependencyRuleList))
 	for _, providerRule := range dep.DeleteDependencyRuleList {
 		proProkey := path.GenerateProviderDependencyRuleKey(providerRule.Tenant, providerRule)
@@ -72,7 +73,7 @@ func (dep *Dependency) removeConsumerOfProviderRule(ctx context.Context) ([]clie
 	return opts, nil
 }
 
-func (dep *Dependency) addConsumerOfProviderRule(ctx context.Context) ([]client.PluginOp, error) {
+func addConsumerOfProviderRule(ctx context.Context, dep *datasource.Dependency) ([]client.PluginOp, error) {
 	opts := make([]client.PluginOp, 0, len(dep.CreateDependencyRuleList))
 	for _, providerRule := range dep.CreateDependencyRuleList {
 		proProkey := path.GenerateProviderDependencyRuleKey(providerRule.Tenant, providerRule)
@@ -97,7 +98,7 @@ func (dep *Dependency) addConsumerOfProviderRule(ctx context.Context) ([]client.
 	return opts, nil
 }
 
-func (dep *Dependency) updateProvidersRuleOfConsumer(_ context.Context) ([]client.PluginOp, error) {
+func updateProvidersRuleOfConsumer(_ context.Context, dep *datasource.Dependency) ([]client.PluginOp, error) {
 	conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
 	if len(dep.ProvidersRule) == 0 {
 		return []client.PluginOp{client.OpDel(client.WithStrKey(conKey))}, nil
@@ -115,16 +116,16 @@ func (dep *Dependency) updateProvidersRuleOfConsumer(_ context.Context) ([]clien
 }
 
 // Commit is dependent rule operations
-func (dep *Dependency) Commit(ctx context.Context) error {
-	dopts, err := dep.removeConsumerOfProviderRule(ctx)
+func CommitDep(ctx context.Context, dep *datasource.Dependency) error {
+	dopts, err := removeConsumerOfProviderRule(ctx, dep)
 	if err != nil {
 		return err
 	}
-	copts, err := dep.addConsumerOfProviderRule(ctx)
+	copts, err := addConsumerOfProviderRule(ctx, dep)
 	if err != nil {
 		return err
 	}
-	uopts, err := dep.updateProvidersRuleOfConsumer(ctx)
+	uopts, err := updateProvidersRuleOfConsumer(ctx, dep)
 	if err != nil {
 		return err
 	}

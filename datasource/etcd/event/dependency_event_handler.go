@@ -20,6 +20,7 @@ package event
 import (
 	"context"
 	"fmt"
+	"github.com/apache/servicecomb-service-center/datasource"
 	"sync"
 	"time"
 
@@ -184,17 +185,35 @@ func (h *DependencyEventHandler) dependencyRuleHandle(res interface{}) error {
 	consumerInfo := pb.DependenciesToKeys([]*pb.MicroServiceKey{r.Consumer}, domainProject)[0]
 	providersInfo := pb.DependenciesToKeys(r.Providers, domainProject)
 
-	var dep serviceUtil.Dependency
+	var dep datasource.Dependency
 	var err error
 	dep.DomainProject = domainProject
 	dep.Consumer = consumerInfo
 	dep.ProvidersRule = providersInfo
+	//conKey := path.GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
+	//
+	//oldProviderRules, err :=serviceUtil.TransferToMicroServiceDependency(ctx, conKey)
+	//if err != nil {
+	//	log.Errorf(err, "update dependency rule failed, get consumer[%s/%s/%s/%s]'s dependency rule failed",
+	//		dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version)
+	//	return err
+	//}
+	//consumerFlag := strings.Join([]string{dep.Consumer.Environment, dep.Consumer.AppId, dep.Consumer.ServiceName, dep.Consumer.Version}, "/")
+	//
+	//createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList := filter(ctx, dep)
+	//if len(createDependencyRuleList) == 0 && len(existDependencyRuleList) == 0 && len(deleteDependencyRuleList) == 0 {
+	//	return nil
+	//}
 	if r.Override {
+		//datasource.ParseOverrideRules(ctx,&dep,oldProviderRules)
 		err = serviceUtil.CreateDependencyRule(ctx, &dep)
 	} else {
+		//datasource.ParseAddOrUpdateRules(ctx,&dep,oldProviderRules)
 		err = serviceUtil.AddDependencyRule(ctx, &dep)
 	}
-
+	//if len(dep.CreateDependencyRuleList)!=0||len(dep.DeleteDependencyRuleList)!=0 {
+	//	err = serviceUtil.Commit(ctx,&dep)
+	//}
 	if err != nil {
 		log.Errorf(err, "modify dependency rule failed, override: %t, consumer %s", r.Override, consumerFlag)
 		return fmt.Errorf("override: %t, consumer is %s, %s", r.Override, consumerFlag, err.Error())
