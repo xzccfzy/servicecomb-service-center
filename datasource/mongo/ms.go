@@ -293,17 +293,35 @@ func (ds *DataSource) DelServicePri(ctx context.Context, serviceID string, force
 		}
 
 	}
-	//todo del dep
+
 	schemaOps := client.MongoOperation{Table: CollectionSchema, Models: []mongo.WriteModel{mongo.NewDeleteManyModel().SetFilter(bson.M{ColumnServiceID: serviceID})}}
 	rulesOps := client.MongoOperation{Table: CollectionRule, Models: []mongo.WriteModel{mongo.NewDeleteManyModel().SetFilter(bson.M{ColumnServiceID: serviceID})}}
 	instanceOps := client.MongoOperation{Table: CollectionInstance, Models: []mongo.WriteModel{mongo.NewDeleteManyModel().SetFilter(bson.M{StringBuilder([]string{ColumnInstanceInfo, ColumnServiceID}): serviceID})}}
 	serviceOps := client.MongoOperation{Table: CollectionService, Models: []mongo.WriteModel{mongo.NewDeleteOneModel().SetFilter(bson.M{StringBuilder([]string{ColumnServiceInfo, ColumnServiceID}): serviceID})}}
 
 	err = client.GetMongoClient().MultiTableBatchUpdate(ctx, []client.MongoOperation{schemaOps, rulesOps, instanceOps, serviceOps})
+
 	if err != nil {
 		log.Error(fmt.Sprintf("micro-service[%s] failed, operator: %s", serviceID, remoteIP), err)
 		return discovery.CreateResponse(discovery.ErrUnavailableBackend, err.Error()), err
 	}
+
+	domainProject := util.ToDomainProject(microservice.Domain, microservice.Project)
+	serviceKey := &discovery.MicroServiceKey{
+		Tenant:      domainProject,
+		Environment: microservice.ServiceInfo.Environment,
+		AppId:       microservice.ServiceInfo.AppId,
+		ServiceName: microservice.ServiceInfo.ServiceName,
+		Version:     microservice.ServiceInfo.Version,
+		Alias:       microservice.ServiceInfo.Alias,
+	}
+
+	err = DeleteDependencyForDeleteService(domainProject, serviceID, serviceKey)
+	if err != nil {
+		log.Error(fmt.Sprintf("micro-service[%s] failed, operator: %s", serviceID, remoteIP), err)
+		return discovery.CreateResponse(discovery.ErrUnavailableBackend, err.Error()), err
+	}
+
 	return discovery.CreateResponse(discovery.ResponseSuccess, "Unregister service successfully."), nil
 }
 
@@ -2153,7 +2171,72 @@ func (ds *DataSource) reshapeProviderKey(ctx context.Context, provider *discover
 }
 
 func AddServiceVersionRule(ctx context.Context, domainProject string, consumer *discovery.MicroService, provider *discovery.MicroServiceKey) error {
+	consumerKey := discovery.MicroServiceToKey(domainProject, consumer)
+	exist, err := DependencyRuleExist(ctx, provider, consumerKey)
+	if exist || err != nil {
+		return err
+	}
+
+	r := &discovery.ConsumerDependency{
+		Consumer:  consumerKey,
+		Providers: []*discovery.MicroServiceKey{provider},
+		Override:  false,
+	}
+	err = syncDependencyRule(ctx, domainProject, r)
+
+	//Dependencies := []*discovery.ConsumerDependency{
+	//	{
+	//		Consumer:  consumerKey,
+	//		Providers: []*discovery.MicroServiceKey{provider},
+	//		Override:  false,
+	//	},
+	//}
+	//
+	//resp, err := datasource.Instance().AddOrUpdateDependencies(ctx, Dependencies, false)
+
+	if err != nil {
+		return err
+	}
+
+	//if resp.Code == discovery.ResponseSuccess {
+	//	log.Info(fmt.Sprintf("put in queue[%s]: consumer[%s/%s/%s/%s] -> provider[%s/%s/%s/%s]", consumer.ServiceId,
+	//		consumer.Environment, consumer.AppId, consumer.ServiceName, consumer.Version,
+	//		provider.Environment, provider.AppId, provider.ServiceName, provider.Version))
+	//}
+
 	return nil
+}
+
+func DependencyRuleExist(ctx context.Context, provider *discovery.MicroServiceKey, consumer *discovery.MicroServiceKey) (bool, error) {
+	targetDomainProject := provider.Tenant
+	if len(targetDomainProject) == 0 {
+		targetDomainProject = consumer.Tenant
+	}
+	consumerKey := GenerateConsumerDependencyRuleKey(consumer.Tenant, consumer)
+	existed, err := DependencyRuleExistUtil(ctx, consumerKey, provider)
+	if err != nil || existed {
+		return existed, err
+	}
+	providerKey := GenerateProviderDependencyRuleKey(targetDomainProject, provider)
+	return DependencyRuleExistUtil(ctx, providerKey, consumer)
+}
+
+func DependencyRuleExistUtil(ctx context.Context, key bson.M, target *discovery.MicroServiceKey) (bool, error) {
+	compareData, err := TransferToMicroServiceDependency(ctx, key)
+	if err != nil {
+		return false, err
+	}
+
+	if len(compareData.Dependency) != 0 {
+		isEqual, err := datasource.ContainServiceDependency(compareData.Dependency, target)
+		if err != nil {
+			return false, err
+		}
+		if isEqual {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func GetInstance(ctx context.Context, serviceID string, instanceID string) (*Instance, error) {
@@ -2848,4 +2931,16 @@ func GetInstancesByServiceID(ctx context.Context, serviceID string) ([]*discover
 		return res, nil
 	}
 	return res, nil
+}
+
+func DeleteDependencyForDeleteService(domainProject string, serviceID string, service *discovery.MicroServiceKey) error {
+	conDep := new(discovery.ConsumerDependency)
+	conDep.Consumer = service
+	conDep.Providers = []*discovery.MicroServiceKey{}
+	conDep.Override = true
+	err := syncDependencyRule(context.TODO(), domainProject, conDep)
+	if err != nil {
+		return err
+	}
+	return nil
 }
