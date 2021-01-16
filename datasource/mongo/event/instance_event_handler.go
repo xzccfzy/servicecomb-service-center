@@ -19,7 +19,12 @@ package event
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
+
+	simple "github.com/apache/servicecomb-service-center/pkg/time"
+	"github.com/apache/servicecomb-service-center/server/notify"
 
 	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/mongo"
@@ -46,7 +51,7 @@ func (h InstanceEventHandler) OnEvent(evt sd.MongoEvent) {
 	instance := evt.Value.(sd.Instance)
 	providerID := instance.InstanceInfo.ServiceId
 	providerInstanceID := instance.InstanceInfo.InstanceId
-
+	domainProject := instance.Domain + "/" + instance.Project
 	cacheService := sd.Store().Service().Cache().Get(providerID)
 	var microService *discovery.MicroService
 	if cacheService != nil {
@@ -56,11 +61,11 @@ func (h InstanceEventHandler) OnEvent(evt sd.MongoEvent) {
 		log.Info("get cached service failed, then get from database")
 		service, err := mongo.GetService(context.Background(), bson.M{"serviceinfo.serviceid": providerID})
 		if err != nil {
-			log.Error("query database error", err)
-			return
-		}
-		if service == nil {
-			log.Warn(fmt.Sprintf("there is no service with id [%s] in the database", providerID))
+			if errors.Is(err, datasource.ErrNoData) {
+				log.Warn(fmt.Sprintf("there is no service with id [%s] in the database", providerID))
+			} else {
+				log.Error("query database error", err)
+			}
 			return
 		}
 		microService = service.ServiceInfo // service in the cache may not ready, query from db once
@@ -73,10 +78,37 @@ func (h InstanceEventHandler) OnEvent(evt sd.MongoEvent) {
 	if !syncernotify.GetSyncerNotifyCenter().Closed() {
 		NotifySyncerInstanceEvent(evt, microService)
 	}
+	ctx := util.SetDomainProject(context.Background(), instance.Domain, instance.Project)
+	consumerIDS, _, err := mongo.GetAllConsumerIds(ctx, microService)
+	if err != nil {
+		log.Error(fmt.Sprintf("get service[%s][%s/%s/%s/%s]'s consumerIDs failed",
+			providerID, microService.Environment, microService.AppId, microService.ServiceName, microService.Version), err)
+		return
+	}
+	PublishInstanceEvent(evt, domainProject, discovery.MicroServiceToKey(domainProject, microService), consumerIDS)
 }
 
 func NewInstanceEventHandler() *InstanceEventHandler {
 	return &InstanceEventHandler{}
+}
+
+func PublishInstanceEvent(evt sd.MongoEvent, domainProject string, serviceKey *discovery.MicroServiceKey, subscribers []string) {
+	if len(subscribers) == 0 {
+		return
+	}
+	response := &discovery.WatchInstanceResponse{
+		Response: discovery.CreateResponse(discovery.ResponseSuccess, "Watch instance successfully."),
+		Action:   string(evt.Type),
+		Key:      serviceKey,
+		Instance: evt.Value.(sd.Instance).InstanceInfo,
+	}
+	for _, consumerID := range subscribers {
+		evt := notify.NewInstanceEventWithTime(consumerID, domainProject, -1, simple.FromTime(time.Now()), response)
+		err := notify.Center().Publish(evt)
+		if err != nil {
+			log.Error(fmt.Sprintf("publish event[%v] into channel failed", evt), err)
+		}
+	}
 }
 
 func NotifySyncerInstanceEvent(event sd.MongoEvent, microService *discovery.MicroService) {

@@ -19,11 +19,13 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/pkg/validate"
 	"strings"
 
+	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/mongo/client"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	pb "github.com/go-chassis/cari/discovery"
@@ -88,13 +90,13 @@ func (dr *DependencyRelation) GetDependencyProviders(opts ...DependencyRelationF
 			filter := GeneratorServiceFilter(dr.ctx, providerID)
 			provider, err := GetService(dr.ctx, filter)
 			if err != nil {
-				log.Warn(fmt.Sprintf("get provider[%s/%s/%s/%s] failed",
-					key.Environment, key.AppId, key.ServiceName, key.Version))
-				continue
-			}
-			if provider == nil {
-				log.Warn(fmt.Sprintf("provider[%s/%s/%s/%s] does not exist",
-					key.Environment, key.AppId, key.ServiceName, key.Version))
+				if errors.Is(err, datasource.ErrNoData) {
+					log.Warn(fmt.Sprintf("provider[%s/%s/%s/%s] does not exist",
+						key.Environment, key.AppId, key.ServiceName, key.Version))
+				} else {
+					log.Warn(fmt.Sprintf("get provider[%s/%s/%s/%s] failed",
+						key.Environment, key.AppId, key.ServiceName, key.Version))
+				}
 				continue
 			}
 			if op.NonSelf && providerID == dr.consumer.ServiceId {
@@ -346,7 +348,7 @@ func (dr *DependencyRelation) GetDependencyConsumerIds() ([]string, error) {
 	consumerIDs := make([]string, 0, len(consumerDependAllList))
 	for _, consumer := range consumerDependAllList {
 		consumerID, err := GetServiceID(dr.ctx, consumer)
-		if err != nil {
+		if err != nil && !errors.Is(err, datasource.ErrNoData) {
 			log.Error(fmt.Sprintf("get consumer[%s/%s/%s/%s] failed",
 				consumer.Environment, consumer.AppId, consumer.ServiceName, consumer.Version), err)
 			return nil, err

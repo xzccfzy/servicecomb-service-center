@@ -43,6 +43,6 @@ func IsDuplicateKey(err error) bool {
 	return false
 }
 
-func IsNoneDoc(err error) bool {
+func IsNoneDocErr(err error) bool {
 	return err == ErrNoDocuments
 }

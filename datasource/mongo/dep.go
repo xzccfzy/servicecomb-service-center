@@ -19,6 +19,7 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
@@ -36,7 +37,13 @@ func (ds *DataSource) SearchProviderDependency(ctx context.Context, request *dis
 	filter := GeneratorServiceFilter(ctx, providerServiceID)
 	provider, err := GetService(ctx, filter)
 	if err != nil {
-		log.Error("GetProviderDependencies failed, provider is "+providerServiceID, err)
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("query provider service failed, there is no provider %s in db", providerServiceID))
+			return &discovery.GetProDependenciesResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Provider does not exist"),
+			}, nil
+		}
+		log.Error(fmt.Sprintf("query provider from db error, provider is %s", providerServiceID), err)
 		return nil, err
 	}
 	if provider == nil {
@@ -69,7 +76,13 @@ func (ds *DataSource) SearchConsumerDependency(ctx context.Context, request *dis
 	filter := GeneratorServiceFilter(ctx, consumerID)
 	consumer, err := GetService(ctx, filter)
 	if err != nil {
-		log.Error(fmt.Sprintf("GetConsumerDependencies failed, consumer is %s", consumerID), err)
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("query consumer service failed, there is no consumer %s in db", consumerID))
+			return &discovery.GetConDependenciesResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Consumer does not exist"),
+			}, nil
+		}
+		log.Error(fmt.Sprintf("query consumer from db error, consumer is %s", consumerID), err)
 		return nil, err
 	}
 	if consumer == nil {
@@ -82,7 +95,7 @@ func (ds *DataSource) SearchConsumerDependency(ctx context.Context, request *dis
 	dr := NewConsumerDependencyRelation(ctx, domainProject, consumer.ServiceInfo)
 	services, err := dr.GetDependencyProviders(ToDependencyFilterOptions(request)...)
 	if err != nil {
-		log.Error(fmt.Sprintf("GetConsumerDependencies failed, consumer is %s/%s/%s/%s",
+		log.Error(fmt.Sprintf("query consumer failed, consumer is %s/%s/%s/%s",
 			consumer.ServiceInfo.Environment, consumer.ServiceInfo.AppId, consumer.ServiceInfo.ServiceName, consumer.ServiceInfo.Version), err)
 		return &discovery.GetConDependenciesResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
@@ -114,7 +127,7 @@ func (ds *DataSource) AddOrUpdateDependencies(ctx context.Context, dependencyInf
 		}
 
 		consumerID, err := GetServiceID(ctx, consumerInfo)
-		if err != nil {
+		if err != nil && !errors.Is(err, datasource.ErrNoData) {
 			log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t, get consumer %s id failed",
 				override, consumerFlag), err)
 			return discovery.CreateResponse(discovery.ErrInternal, err.Error()), err
@@ -395,34 +408,34 @@ func removeConsumerDeps(ctx context.Context, depRule *DependencyRule, cache map[
 	return nil
 }
 
-func GetServiceID(ctx context.Context, key *discovery.MicroServiceKey) (serviceID string, err error) {
-	domain := util.ParseDomain(ctx)
-	project := util.ParseProject(ctx)
-	filter := bson.M{
-		ColumnDomain:  domain,
-		ColumnProject: project,
-		StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
-		StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
-		StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
-		StringBuilder([]string{ColumnServiceInfo, ColumnVersion}):     key.Version}
-
-	findRes, err := client.GetMongoClient().FindOne(ctx, CollectionService, filter)
-	if err != nil {
-		return
-	}
-	if findRes.Err() != nil {
-		return
-	}
-	var service *Service
-	err = findRes.Decode(&service)
-	if err != nil {
-		return
-	}
-	if service == nil {
-		return
-	}
-	return service.ServiceInfo.ServiceId, nil
-}
+//func GetServiceID(ctx context.Context, key *discovery.MicroServiceKey) (serviceID string, err error) {
+//	domain := util.ParseDomain(ctx)
+//	project := util.ParseProject(ctx)
+//	filter := bson.M{
+//		ColumnDomain:  domain,
+//		ColumnProject: project,
+//		StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
+//		StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
+//		StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
+//		StringBuilder([]string{ColumnServiceInfo, ColumnVersion}):     key.Version}
+//
+//	findRes, err := client.GetMongoClient().FindOne(ctx, CollectionService, filter)
+//	if err != nil {
+//		return
+//	}
+//	if findRes.Err() != nil {
+//		return
+//	}
+//	var service *Service
+//	err = findRes.Decode(&service)
+//	if err != nil {
+//		return
+//	}
+//	if service == nil {
+//		return
+//	}
+//	return service.ServiceInfo.ServiceId, nil
+//}
 
 func TransferToMicroServiceDependency(ctx context.Context, filter bson.M) (*discovery.MicroServiceDependency, error) {
 	microServiceDependency := &discovery.MicroServiceDependency{
@@ -461,5 +474,27 @@ func GetConsumerDepInfo(ctx context.Context, filter bson.M) ([]*discovery.Consum
 		ConsumerDeps = append(ConsumerDeps, dep.ConsumerDepInfo)
 	}
 	return ConsumerDeps, nil
+}
 
+func GetServiceID(ctx context.Context, key *discovery.MicroServiceKey) (string, error) {
+	id, err := getServiceID(ctx, GeneratorServiceNameFilter(ctx, key))
+	if err != nil && !errors.Is(err, datasource.ErrNoData) {
+		return "", err
+	}
+	if len(id) == 0 && len(key.Alias) != 0 {
+		return getServiceID(ctx, GeneratorServiceAliasFilter(ctx, key))
+	}
+	return id, nil
+}
+
+func getServiceID(ctx context.Context, filter bson.M) (serviceID string, err error) {
+	svc, err := GetService(ctx, filter)
+	if err != nil {
+		return
+	}
+	if svc != nil {
+		serviceID = svc.ServiceInfo.ServiceId
+		return
+	}
+	return
 }

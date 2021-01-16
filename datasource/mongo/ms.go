@@ -19,10 +19,13 @@ package mongo
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -62,36 +65,59 @@ func (ds *DataSource) RegisterService(ctx context.Context, request *discovery.Cr
 	}
 	service.Timestamp = strconv.FormatInt(time.Now().Unix(), 10)
 	service.ModTimestamp = service.Timestamp
-	// the service unique index in table is (serviceId,serviceEnv,serviceAppid,servicename,serviceAlias,serviceVersion)
+	// the service unique index in table is (serviceId/serviceEnv,serviceAppid,servicename,serviceVersion)
+	if len(service.Alias) != 0 {
+		serviceID, err := GetServiceID(ctx, &discovery.MicroServiceKey{
+			Environment: service.Environment,
+			AppId:       service.AppId,
+			ServiceName: service.ServiceName,
+			Version:     service.Version,
+			Alias:       service.Alias,
+		})
+		if err != nil && !errors.Is(err, datasource.ErrNoData) {
+			return &discovery.CreateServiceResponse{
+				Response: discovery.CreateResponse(discovery.ErrUnavailableBackend, err.Error()),
+			}, err
+		}
+		if len(serviceID) != 0 {
+			if len(requestServiceID) != 0 && requestServiceID != serviceID {
+				log.Warn(fmt.Sprintf("create micro-service[%s] failed, service already exists, operator: %s",
+					serviceFlag, remoteIP))
+				return &discovery.CreateServiceResponse{
+					Response: discovery.CreateResponse(discovery.ErrServiceAlreadyExists,
+						"ServiceID conflict or found the same service with different id."),
+				}, nil
+			}
+			return &discovery.CreateServiceResponse{
+				Response:  discovery.CreateResponse(discovery.ResponseSuccess, "register service successfully"),
+				ServiceId: serviceID,
+			}, nil
+		}
+	}
 	insertRes, err := client.GetMongoClient().Insert(ctx, CollectionService, &Service{Domain: domain, Project: project, ServiceInfo: service})
 	if err != nil {
 		if client.IsDuplicateKey(err) {
-			if len(requestServiceID) == 0 {
-				serviceIDInner, err := GetServiceID(ctx, &discovery.MicroServiceKey{
-					Environment: service.Environment,
-					AppId:       service.AppId,
-					ServiceName: service.ServiceName,
-					Version:     service.Version,
-				})
-				if err != nil {
-					return &discovery.CreateServiceResponse{
-						Response: discovery.CreateResponse(discovery.ErrUnavailableBackend, err.Error()),
-					}, err
-				}
-				if len(serviceIDInner) != 0 {
-					log.Warn(fmt.Sprintf("create micro-service[%s][%s] failed, service already exists, operator: %s",
-						serviceIDInner, serviceFlag, remoteIP))
-					return &discovery.CreateServiceResponse{
-						Response:  discovery.CreateResponse(discovery.ResponseSuccess, "register service successfully"),
-						ServiceId: serviceIDInner,
-					}, nil
-				}
+			serviceIDInner, err := GetServiceID(ctx, &discovery.MicroServiceKey{
+				Environment: service.Environment,
+				AppId:       service.AppId,
+				ServiceName: service.ServiceName,
+				Version:     service.Version,
+			})
+			if err != nil && !errors.Is(err, datasource.ErrNoData) {
+				return &discovery.CreateServiceResponse{
+					Response: discovery.CreateResponse(discovery.ErrUnavailableBackend, err.Error()),
+				}, err
 			}
-			log.Warn(fmt.Sprintf("create micro-service[%s] failed, service already exists, operator: %s",
-				serviceFlag, remoteIP))
+			// serviceid conflict with the service in the database
+			if len(requestServiceID) != 0 && serviceIDInner != requestServiceID {
+				return &discovery.CreateServiceResponse{
+					Response: discovery.CreateResponse(discovery.ErrServiceAlreadyExists,
+						"ServiceID conflict or found the same service with different id."),
+				}, nil
+			}
 			return &discovery.CreateServiceResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceAlreadyExists,
-					"ServiceID conflict or found the same service with different id."),
+				Response:  discovery.CreateResponse(discovery.ResponseSuccess, "register service successfully"),
+				ServiceId: serviceIDInner,
 			}, nil
 		}
 		log.Error(fmt.Sprintf("create micro-service[%s] failed, service already exists, operator: %s",
@@ -173,24 +199,24 @@ func (ds *DataSource) GetService(ctx context.Context, request *discovery.GetServ
 	*discovery.GetServiceResponse, error) {
 	svc, err := GetServiceByID(ctx, request.ServiceId)
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.GetServiceResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist."),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("failed to get single service %s from mongo", request.ServiceId), err)
 		return &discovery.GetServiceResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, "get service data from mongodb failed."),
 		}, err
 	}
-	if svc != nil {
-		return &discovery.GetServiceResponse{
-			Response: discovery.CreateResponse(discovery.ResponseSuccess, "Get service successfully."),
-			Service:  svc.ServiceInfo,
-		}, nil
-	}
 	return &discovery.GetServiceResponse{
-		Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist."),
+		Response: discovery.CreateResponse(discovery.ResponseSuccess, "Get service successfully."),
+		Service:  svc.ServiceInfo,
 	}, nil
 }
 
 func (ds *DataSource) ExistServiceByID(ctx context.Context, request *discovery.GetExistenceByIDRequest) (*discovery.GetExistenceByIDResponse, error) {
-
 	exist, err := ServiceExistID(ctx, request.ServiceId)
 	if err != nil {
 		return &discovery.GetExistenceByIDResponse{
@@ -267,14 +293,14 @@ func (ds *DataSource) DelServicePri(ctx context.Context, serviceID string, force
 	}
 	microservice, err := GetService(ctx, GeneratorServiceFilter(ctx, serviceID))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("%s micro-service %s failed, service does not exist, operator: %s",
+				title, serviceID, remoteIP))
+			return discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist."), nil
+		}
 		log.Error(fmt.Sprintf("%s micro-service %s failed, get service file failed, operator: %s",
 			title, serviceID, remoteIP), err)
 		return discovery.CreateResponse(discovery.ErrInternal, err.Error()), err
-	}
-	if microservice == nil {
-		log.Error(fmt.Sprintf("%s micro-service %s failed, service does not exist, operator: %s",
-			title, serviceID, remoteIP), err)
-		return discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist."), nil
 	}
 	// 强制删除，则与该服务相关的信息删除，非强制删除： 如果作为该被依赖（作为provider，提供服务,且不是只存在自依赖）或者存在实例，则不能删除
 	if !force {
@@ -375,14 +401,14 @@ func (ds *DataSource) GetServiceDetail(ctx context.Context, request *discovery.G
 	*discovery.GetServiceDetailResponse, error) {
 	mgSvc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			return &discovery.GetServiceDetailResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist."),
+			}, nil
+		}
 		return &discovery.GetServiceDetailResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
-	}
-	if mgSvc == nil {
-		return &discovery.GetServiceDetailResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist."),
-		}, nil
 	}
 	svc := mgSvc.ServiceInfo
 	key := &discovery.MicroServiceKey{
@@ -488,13 +514,14 @@ func (ds *DataSource) AddTags(ctx context.Context, request *discovery.AddService
 	remoteIP := util.GetIPFromContext(ctx)
 	service, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.AddServiceTagsResponse{Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist")}, nil
+		}
 		log.Error(fmt.Sprintf("failed to add tags for service %s for get service failed", request.ServiceId), err)
 		return &discovery.AddServiceTagsResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, "Failed to check service exist"),
 		}, nil
-	}
-	if service == nil {
-		return &discovery.AddServiceTagsResponse{Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist")}, nil
 	}
 	tags := request.Tags
 	res := quota.NewApplyQuotaResource(quota.TagQuotaType, util.ParseDomainProject(ctx), request.ServiceId, int64(len(tags)))
@@ -532,14 +559,15 @@ func (ds *DataSource) AddTags(ctx context.Context, request *discovery.AddService
 func (ds *DataSource) GetTags(ctx context.Context, request *discovery.GetServiceTagsRequest) (*discovery.GetServiceTagsResponse, error) {
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.GetServiceTagsResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("failed to get service %s tags", request.ServiceId), err)
 		return &discovery.GetServiceTagsResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
-		}, nil
-	}
-	if svc == nil {
-		return &discovery.GetServiceTagsResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
 		}, nil
 	}
 	return &discovery.GetServiceTagsResponse{
@@ -551,14 +579,15 @@ func (ds *DataSource) GetTags(ctx context.Context, request *discovery.GetService
 func (ds *DataSource) UpdateTag(ctx context.Context, request *discovery.UpdateServiceTagRequest) (*discovery.UpdateServiceTagResponse, error) {
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.UpdateServiceTagResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("failed to get %s tags", request.ServiceId), err)
 		return &discovery.UpdateServiceTagResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
-		}, nil
-	}
-	if svc == nil {
-		return &discovery.UpdateServiceTagResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
 		}, nil
 	}
 	dataTags := svc.Tags
@@ -590,14 +619,15 @@ func (ds *DataSource) UpdateTag(ctx context.Context, request *discovery.UpdateSe
 func (ds *DataSource) DeleteTags(ctx context.Context, request *discovery.DeleteServiceTagsRequest) (*discovery.DeleteServiceTagsResponse, error) {
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.DeleteServiceTagsResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("failed to get service %s tags", request.ServiceId), err)
 		return &discovery.DeleteServiceTagsResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
-		}, nil
-	}
-	if svc == nil {
-		return &discovery.DeleteServiceTagsResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service does not exist"),
 		}, nil
 	}
 	dataTags := svc.Tags
@@ -660,15 +690,16 @@ func (ds *DataSource) GetSchema(ctx context.Context, request *discovery.GetSchem
 func (ds *DataSource) GetAllSchemas(ctx context.Context, request *discovery.GetAllSchemaRequest) (*discovery.GetAllSchemaResponse, error) {
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("service %s not exist in db", request.ServiceId))
+			return &discovery.GetAllSchemaResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "GetAllSchemas failed for service not exist"),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("get service[%s] all schemas failed, get service failed", request.ServiceId), err)
 		return &discovery.GetAllSchemaResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
-	}
-	if svc == nil {
-		return &discovery.GetAllSchemaResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "GetAllSchemas failed for service not exist"),
-		}, nil
 	}
 	schemasList := svc.ServiceInfo.Schemas
 	if len(schemasList) == 0 {
@@ -792,10 +823,10 @@ func (ds *DataSource) ModifySchema(ctx context.Context, request *discovery.Modif
 func (ds *DataSource) ModifySchemas(ctx context.Context, request *discovery.ModifySchemasRequest) (*discovery.ModifySchemasResponse, error) {
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, request.ServiceId))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			return &discovery.ModifySchemasResponse{Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist")}, nil
+		}
 		return &discovery.ModifySchemasResponse{Response: discovery.CreateResponse(discovery.ErrInternal, err.Error())}, err
-	}
-	if svc == nil {
-		return &discovery.ModifySchemasResponse{Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Service not exist")}, nil
 	}
 	respErr := ds.modifySchemas(ctx, svc.ServiceInfo, request.Schemas)
 	if respErr != nil {
@@ -933,10 +964,10 @@ func (ds *DataSource) modifySchema(ctx context.Context, serviceID string, schema
 	remoteIP := util.GetIPFromContext(ctx)
 	svc, err := GetService(ctx, GeneratorServiceFilter(ctx, serviceID))
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			return discovery.NewError(discovery.ErrServiceNotExists, "Service does not exist.")
+		}
 		return discovery.NewError(discovery.ErrInternal, err.Error())
-	}
-	if svc == nil {
-		return discovery.NewError(discovery.ErrServiceNotExists, "Service does not exist.")
 	}
 	microservice := svc.ServiceInfo
 	var isExist bool
@@ -1216,7 +1247,7 @@ func GetService(ctx context.Context, filter bson.M) (*Service, error) {
 	var svc *Service
 	if findRes.Err() != nil {
 		//not get any service,not db err
-		return nil, nil
+		return nil, datasource.ErrNoData
 	}
 	err = findRes.Decode(&svc)
 	if err != nil {
@@ -1563,7 +1594,7 @@ func (ds *DataSource) RegisterInstance(ctx context.Context, request *discovery.R
 	return registryInstance(ctx, request)
 }
 
-// GetInstances returns instances under the current domain
+// GetInstance returns instance under the current domain
 func (ds *DataSource) GetInstance(ctx context.Context, request *discovery.GetOneInstanceRequest) (*discovery.GetOneInstanceResponse, error) {
 	var service *Service
 	var err error
@@ -1572,38 +1603,38 @@ func (ds *DataSource) GetInstance(ctx context.Context, request *discovery.GetOne
 		filter := GeneratorServiceFilter(ctx, request.ConsumerServiceId)
 		service, err = GetService(ctx, filter)
 		if err != nil {
+			if errors.Is(err, datasource.ErrNoData) {
+				log.Debug(fmt.Sprintf("consumer does not exist, consumer %s find provider instance %s %s",
+					request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId))
+				return &discovery.GetOneInstanceResponse{
+					Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
+						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
+				}, nil
+			}
 			log.Error(fmt.Sprintf(" get consumer failed, consumer %s find provider instance %s",
 				request.ConsumerServiceId, request.ProviderInstanceId), err)
 			return &discovery.GetOneInstanceResponse{
 				Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 			}, err
 		}
-		if service == nil {
-			log.Error(fmt.Sprintf("consumer does not exist, consumer %s find provider instance %s %s",
-				request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId), err)
-			return &discovery.GetOneInstanceResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
-					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-			}, nil
-		}
 	}
 
 	filter := GeneratorServiceFilter(ctx, request.ProviderServiceId)
 	provider, err := GetService(ctx, filter)
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("provider does not exist, consumer %s find provider instance %s %s",
+				request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId))
+			return &discovery.GetOneInstanceResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
+					fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId)),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("get provider failed, consumer %s find provider instance %s %s",
 			request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId), err)
 		return &discovery.GetOneInstanceResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
-	}
-	if provider == nil {
-		log.Error(fmt.Sprintf("provider does not exist, consumer %s find provider instance %s %s",
-			request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId), err)
-		return &discovery.GetOneInstanceResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
-				fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId)),
-		}, nil
 	}
 	findFlag := func() string {
 		return fmt.Sprintf("consumer[%s][%s/%s/%s/%s] find provider[%s][%s/%s/%s/%s] instance[%s]",
@@ -1620,27 +1651,52 @@ func (ds *DataSource) GetInstance(ctx context.Context, request *discovery.GetOne
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
 	}
-	if services != nil {
-		serviceIDs = filterServiceIDs(ctx, request.ConsumerServiceId, request.Tags, services)
-	}
-	if services == nil || len(serviceIDs) == 0 {
-		mes := fmt.Errorf("%s failed, provider does not exist", findFlag())
-		log.Error("get instance failed", mes)
-		return &discovery.GetOneInstanceResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, mes.Error()),
-		}, nil
-	}
-	instances, err := instancesFilter(ctx, serviceIDs)
-	if len(instances) == 0 {
+	rev, _ := ctx.Value(util.CtxRequestRevision).(string)
+	serviceIDs = filterServiceIDs(ctx, request.ConsumerServiceId, request.Tags, services)
+	if len(serviceIDs) == 0 {
 		mes := fmt.Errorf("%s failed, provider instance does not exist", findFlag())
 		log.Error("get instance failed", err)
 		return &discovery.GetOneInstanceResponse{
 			Response: discovery.CreateResponse(discovery.ErrInstanceNotExists, mes.Error()),
 		}, nil
 	}
+	instances, err := GetInstancesByServiceID(ctx, request.ProviderServiceId)
+	if err != nil {
+		log.Error(fmt.Sprintf("get instance failed %s", findFlag()), err)
+		return &discovery.GetOneInstanceResponse{
+			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
+		}, err
+	}
+	instance := instances[0]
+	// use explicit instanceId to query
+	if len(request.ProviderInstanceId) != 0 {
+		isExist := false
+		for _, ins := range instances {
+			if ins.InstanceId == request.ProviderInstanceId {
+				instance = ins
+				isExist = true
+				break
+			}
+		}
+		if !isExist {
+			mes := fmt.Errorf("%s failed, provider instance does not exist", findFlag())
+			log.Error("get instance failed", err)
+			return &discovery.GetOneInstanceResponse{
+				Response: discovery.CreateResponse(discovery.ErrInstanceNotExists, mes.Error()),
+			}, nil
+		}
+	}
+
+	newRev, _ := formatRevision(request.ConsumerServiceId, instances)
+	if rev == newRev {
+		instance = nil // for gRPC
+	}
+	// TODO support gRPC output context
+	_ = util.WithResponseRev(ctx, newRev)
+
 	return &discovery.GetOneInstanceResponse{
 		Response: discovery.CreateResponse(discovery.ResponseSuccess, "Get instance successfully."),
-		Instance: instances[0],
+		Instance: instance,
 	}, nil
 }
 
@@ -1651,37 +1707,37 @@ func (ds *DataSource) GetInstances(ctx context.Context, request *discovery.GetIn
 	if len(request.ConsumerServiceId) > 0 {
 		service, err = GetServiceByID(ctx, request.ConsumerServiceId)
 		if err != nil {
+			if errors.Is(err, datasource.ErrNoData) {
+				log.Debug(fmt.Sprintf("consumer does not exist, consumer %s find provider %s instances",
+					request.ConsumerServiceId, request.ProviderServiceId))
+				return &discovery.GetInstancesResponse{
+					Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
+						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
+				}, nil
+			}
 			log.Error(fmt.Sprintf("get consumer failed, consumer %s find provider %s instances",
 				request.ConsumerServiceId, request.ProviderServiceId), err)
 			return &discovery.GetInstancesResponse{
 				Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 			}, err
 		}
-		if service == nil {
-			log.Error(fmt.Sprintf("consumer does not exist, consumer %s find provider %s instances",
-				request.ConsumerServiceId, request.ProviderServiceId), err)
-			return &discovery.GetInstancesResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
-					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-			}, nil
-		}
 	}
 
 	provider, err := GetServiceByID(ctx, request.ProviderServiceId)
 	if err != nil {
+		if errors.Is(err, datasource.ErrNoData) {
+			log.Debug(fmt.Sprintf("provider does not exist, consumer %s find provider %s  instances",
+				request.ConsumerServiceId, request.ProviderServiceId))
+			return &discovery.GetInstancesResponse{
+				Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
+					fmt.Sprintf("provider[%s] does not exist.", request.ProviderServiceId)),
+			}, nil
+		}
 		log.Error(fmt.Sprintf("get provider failed, consumer %s find provider instances %s",
 			request.ConsumerServiceId, request.ProviderServiceId), err)
 		return &discovery.GetInstancesResponse{
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
-	}
-	if provider == nil {
-		log.Error(fmt.Sprintf("provider does not exist, consumer %s find provider %s  instances",
-			request.ConsumerServiceId, request.ProviderServiceId), err)
-		return &discovery.GetInstancesResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
-				fmt.Sprintf("provider[%s] does not exist.", request.ProviderServiceId)),
-		}, nil
 	}
 
 	findFlag := func() string {
@@ -1690,6 +1746,7 @@ func (ds *DataSource) GetInstances(ctx context.Context, request *discovery.GetIn
 			provider.ServiceInfo.ServiceId, provider.ServiceInfo.Environment, provider.ServiceInfo.AppId, provider.ServiceInfo.ServiceName, provider.ServiceInfo.Version)
 	}
 
+	rev, _ := ctx.Value(util.CtxRequestRevision).(string)
 	serviceIDs := filterServiceIDs(ctx, request.ConsumerServiceId, request.Tags, []*Service{provider})
 	if len(serviceIDs) == 0 {
 		mes := fmt.Errorf("%s failed, provider does not exist", findFlag())
@@ -1705,6 +1762,11 @@ func (ds *DataSource) GetInstances(ctx context.Context, request *discovery.GetIn
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
 	}
+	newRev, _ := formatRevision(request.ConsumerServiceId, instances)
+	if rev == newRev {
+		instances = nil // for gRPC
+	}
+	_ = util.WithResponseRev(ctx, newRev)
 	return &discovery.GetInstancesResponse{
 		Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Query service instances successfully."),
 		Instances: instances,
@@ -1802,15 +1864,23 @@ func (ds *DataSource) FindInstances(ctx context.Context, request *discovery.Find
 		Environment: request.Environment,
 		AppId:       request.AppId,
 		ServiceName: request.ServiceName,
-		Alias:       request.ServiceName,
+		Alias:       request.Alias,
 		Version:     request.VersionRule,
+	}
+	rev, ok := ctx.Value(util.CtxRequestRevision).(string)
+	if !ok {
+		err := errors.New("rev request context is not type string")
+		log.Error("", err)
+		return &discovery.FindInstancesResponse{
+			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
+		}, err
 	}
 
 	if apt.IsGlobal(provider) {
-		return ds.findSharedServiceInstance(ctx, request, provider)
+		return ds.findSharedServiceInstance(ctx, request, provider, rev)
 	}
 
-	return ds.findInstance(ctx, request, provider)
+	return ds.findInstance(ctx, request, provider, rev)
 }
 
 func (ds *DataSource) UpdateInstanceStatus(ctx context.Context, request *discovery.UpdateInstanceStatusRequest) (*discovery.UpdateInstanceStatusResponse, error) {
@@ -2046,12 +2116,19 @@ func registryInstance(ctx context.Context, request *discovery.RegisterInstanceRe
 	}, nil
 }
 
-func (ds *DataSource) findSharedServiceInstance(ctx context.Context, request *discovery.FindInstancesRequest, provider *discovery.MicroServiceKey) (*discovery.FindInstancesResponse, error) {
+func (ds *DataSource) findSharedServiceInstance(ctx context.Context, request *discovery.FindInstancesRequest, provider *discovery.MicroServiceKey, rev string) (*discovery.FindInstancesResponse, error) {
 	var err error
 	// it means the shared micro-services must be the same env with SC.
 	provider.Environment = apt.Service.Environment
 	findFlag := func() string {
 		return fmt.Sprintf("find shared provider[%s/%s/%s/%s]", provider.Environment, provider.AppId, provider.ServiceName, provider.Version)
+	}
+	basicFilterServices, err := servicesBasicFilter(ctx, provider)
+	if err != nil {
+		log.Error(fmt.Sprintf("find shared service instance failed %s", findFlag()), err)
+		return &discovery.FindInstancesResponse{
+			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
+		}, err
 	}
 	services, err := findServices(ctx, provider)
 	if err != nil {
@@ -2060,7 +2137,7 @@ func (ds *DataSource) findSharedServiceInstance(ctx context.Context, request *di
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
 	}
-	if services == nil {
+	if services == nil && len(basicFilterServices) == 0 {
 		mes := fmt.Errorf("%s failed, provider does not exist", findFlag())
 		log.Error("find shared service instance failed", mes)
 		return &discovery.FindInstancesResponse{
@@ -2068,12 +2145,6 @@ func (ds *DataSource) findSharedServiceInstance(ctx context.Context, request *di
 		}, nil
 	}
 	serviceIDs := filterServiceIDs(ctx, request.ConsumerServiceId, request.Tags, services)
-	if len(serviceIDs) == 0 {
-		return &discovery.FindInstancesResponse{
-			Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Query service instances successfully."),
-			Instances: nil,
-		}, nil
-	}
 	instances, err := instancesFilter(ctx, serviceIDs)
 	if err != nil {
 		log.Error(fmt.Sprintf("find shared service instance failed %s", findFlag()), err)
@@ -2081,13 +2152,19 @@ func (ds *DataSource) findSharedServiceInstance(ctx context.Context, request *di
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
 	}
+	newRev, _ := formatRevision(request.ConsumerServiceId, instances)
+	if rev == newRev {
+		instances = nil // for gRPC
+	}
+	// TODO support gRPC output context
+	_ = util.WithResponseRev(ctx, newRev)
 	return &discovery.FindInstancesResponse{
 		Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Query service instances successfully."),
 		Instances: instances,
 	}, nil
 }
 
-func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindInstancesRequest, provider *discovery.MicroServiceKey) (*discovery.FindInstancesResponse, error) {
+func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindInstancesRequest, provider *discovery.MicroServiceKey, rev string) (*discovery.FindInstancesResponse, error) {
 	var err error
 	domainProject := util.ParseDomainProject(ctx)
 	service := &Service{ServiceInfo: &discovery.MicroService{Environment: request.Environment}}
@@ -2095,19 +2172,19 @@ func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindI
 		filter := GeneratorServiceFilter(ctx, request.ConsumerServiceId)
 		service, err = GetService(ctx, filter)
 		if err != nil {
+			if errors.Is(err, datasource.ErrNoData) {
+				log.Debug(fmt.Sprintf("consumer does not exist, consumer %s find provider %s/%s/%s/%s",
+					request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName, request.VersionRule))
+				return &discovery.FindInstancesResponse{
+					Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
+						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
+				}, nil
+			}
 			log.Error(fmt.Sprintf("get consumer failed, consumer %s find provider %s/%s/%s/%s",
 				request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName, request.VersionRule), err)
 			return &discovery.FindInstancesResponse{
 				Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 			}, err
-		}
-		if service == nil {
-			log.Error(fmt.Sprintf("consumer does not exist, consumer %s find provider %s/%s/%s/%s",
-				request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName, request.VersionRule), err)
-			return &discovery.FindInstancesResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceNotExists,
-					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-			}, nil
 		}
 		provider.Environment = service.ServiceInfo.Environment
 	}
@@ -2122,6 +2199,13 @@ func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindI
 			request.ConsumerServiceId, service.ServiceInfo.Environment, service.ServiceInfo.AppId, service.ServiceInfo.ServiceName, service.ServiceInfo.Version,
 			provider.Environment, provider.AppId, provider.ServiceName, provider.Version)
 	}
+	basicFilterServices, err := servicesBasicFilter(ctx, provider)
+	if err != nil {
+		log.Error(fmt.Sprintf("find instance failed %s", findFlag()), err)
+		return &discovery.FindInstancesResponse{
+			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
+		}, err
+	}
 	services, err := findServices(ctx, provider)
 	if err != nil {
 		log.Error(fmt.Sprintf("find instance failed %s", findFlag()), err)
@@ -2129,7 +2213,7 @@ func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindI
 			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
 		}, err
 	}
-	if services == nil {
+	if services == nil && len(basicFilterServices) == 0 {
 		mes := fmt.Errorf("%s failed, provider does not exist", findFlag())
 		log.Error("find instance failed", mes)
 		return &discovery.FindInstancesResponse{
@@ -2137,12 +2221,6 @@ func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindI
 		}, nil
 	}
 	serviceIDs := filterServiceIDs(ctx, request.ConsumerServiceId, request.Tags, services)
-	if len(serviceIDs) == 0 {
-		return &discovery.FindInstancesResponse{
-			Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Query service instances successfully."),
-			Instances: nil,
-		}, nil
-	}
 	instances, err := instancesFilter(ctx, serviceIDs)
 	if err != nil {
 		log.Error(fmt.Sprintf("find instance failed %s", findFlag()), err)
@@ -2173,7 +2251,12 @@ func (ds *DataSource) findInstance(ctx context.Context, request *discovery.FindI
 			}, err
 		}
 	}
-
+	newRev, _ := formatRevision(request.ConsumerServiceId, instances)
+	if rev == newRev {
+		instances = nil // for gRPC
+	}
+	// TODO support gRPC output context
+	_ = util.WithResponseRev(ctx, newRev)
 	return &discovery.FindInstancesResponse{
 		Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Query service instances successfully."),
 		Instances: instances,
@@ -2185,7 +2268,7 @@ func (ds *DataSource) reshapeProviderKey(ctx context.Context, provider *discover
 	//维护version的规则,service name 可能是别名，所以重新获取
 	filter := GeneratorServiceFilter(ctx, providerID)
 	providerService, err := GetService(ctx, filter)
-	if providerService == nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -2477,11 +2560,40 @@ func preProcessRegisterInstance(ctx context.Context, instance *discovery.MicroSe
 
 	filter := GeneratorServiceFilter(ctx, instance.ServiceId)
 	microservice, err := GetService(ctx, filter)
-	if microservice == nil || err != nil {
+	if err != nil {
 		return discovery.NewError(discovery.ErrServiceNotExists, "invalid 'serviceID' in request body.")
 	}
 	instance.Version = microservice.ServiceInfo.Version
 	return nil
+}
+
+// servicesBasicFilter query services with domain, project, env, appID, serviceName, alias
+func servicesBasicFilter(ctx context.Context, key *discovery.MicroServiceKey) ([]*Service, error) {
+	tenant := strings.Split(key.Tenant, "/")
+	if len(tenant) != 2 {
+		return nil, errors.New("invalid 'domain' or 'project'")
+	}
+	filter := bson.M{
+		ColumnDomain:  tenant[0],
+		ColumnProject: tenant[1],
+		StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
+		StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
+		StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
+		StringBuilder([]string{ColumnServiceInfo, ColumnAlias}):       key.Alias,
+	}
+	rangeIdx := strings.Index(key.Version, "-")
+	// if the version number is clear, need to add the version number to query
+	switch {
+	case key.Version == "latest":
+		return servicesFilter(ctx, filter)
+	case len(key.Version) > 0 && key.Version[len(key.Version)-1:] == "+":
+		return servicesFilter(ctx, filter)
+	case rangeIdx > 0:
+		return servicesFilter(ctx, filter)
+	default:
+		filter[StringBuilder([]string{ColumnServiceInfo, ColumnVersion})] = key.Version
+		return servicesFilter(ctx, filter)
+	}
 }
 
 func findServices(ctx context.Context, key *discovery.MicroServiceKey) ([]*Service, error) {
@@ -2490,50 +2602,37 @@ func findServices(ctx context.Context, key *discovery.MicroServiceKey) ([]*Servi
 		return nil, errors.New("invalid 'domain' or 'project'")
 	}
 	rangeIdx := strings.Index(key.Version, "-")
+	filter := bson.M{
+		ColumnDomain:  tenant[0],
+		ColumnProject: tenant[1],
+		StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
+		StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
+		StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
+		StringBuilder([]string{ColumnServiceInfo, ColumnAlias}):       key.Alias,
+	}
 	switch {
 	case key.Version == "latest":
-		filter := bson.M{
-			ColumnDomain:  tenant[0],
-			ColumnProject: tenant[1],
-			StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
-			StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
-			StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
-		}
 		return latestServicesFilter(ctx, filter)
 	case len(key.Version) > 0 && key.Version[len(key.Version)-1:] == "+":
 		start := key.Version[:len(key.Version)-1]
-		filter := bson.M{
-			ColumnDomain:  tenant[0],
-			ColumnProject: tenant[1],
-			StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
-			StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
-			StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
-			StringBuilder([]string{ColumnServiceInfo, ColumnVersion}):     bson.M{"$gte": start}}
+		filter[StringBuilder([]string{ColumnServiceInfo, ColumnVersion})] = bson.M{"$gte": start}
 		return servicesFilter(ctx, filter)
 	case rangeIdx > 0:
 		start := key.Version[:rangeIdx]
 		end := key.Version[rangeIdx+1:]
-		filter := bson.M{
-			ColumnDomain:  tenant[0],
-			ColumnProject: tenant[1],
-			StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
-			StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
-			StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
-			StringBuilder([]string{ColumnServiceInfo, ColumnVersion}):     bson.M{"$gte": start, "$lte": end}}
+		filter[StringBuilder([]string{ColumnServiceInfo, ColumnVersion})] = bson.M{"$gte": start, "$lte": end}
 		return servicesFilter(ctx, filter)
 	default:
-		filter := bson.M{
-			ColumnDomain:  tenant[0],
-			ColumnProject: tenant[1],
-			StringBuilder([]string{ColumnServiceInfo, ColumnEnv}):         key.Environment,
-			StringBuilder([]string{ColumnServiceInfo, ColumnAppID}):       key.AppId,
-			StringBuilder([]string{ColumnServiceInfo, ColumnServiceName}): key.ServiceName,
-			StringBuilder([]string{ColumnServiceInfo, ColumnVersion}):     key.Version}
+		filter[StringBuilder([]string{ColumnServiceInfo, ColumnVersion})] = key.Version
 		return servicesFilter(ctx, filter)
 	}
 }
 
 func instancesFilter(ctx context.Context, serviceIDs []string) ([]*discovery.MicroServiceInstance, error) {
+	var instances []*discovery.MicroServiceInstance
+	if len(serviceIDs) == 0 {
+		return instances, nil
+	}
 	resp, err := client.GetMongoClient().Find(ctx, CollectionInstance, bson.M{StringBuilder([]string{ColumnInstanceInfo, ColumnServiceID}): bson.M{"$in": serviceIDs}}, &options.FindOptions{
 		Sort: bson.M{StringBuilder([]string{ColumnInstanceInfo, ColumnVersion}): -1}})
 	if err != nil {
@@ -2542,7 +2641,6 @@ func instancesFilter(ctx context.Context, serviceIDs []string) ([]*discovery.Mic
 	if resp == nil {
 		return nil, errors.New("no related instances were found")
 	}
-	var instances []*discovery.MicroServiceInstance
 	for resp.Next(ctx) {
 		var instance Instance
 		err := resp.Decode(&instance)
@@ -2557,6 +2655,9 @@ func instancesFilter(ctx context.Context, serviceIDs []string) ([]*discovery.Mic
 func filterServiceIDs(ctx context.Context, consumerID string, tags []string, services []*Service) []string {
 	var filterService []*Service
 	var serviceIDs []string
+	if len(services) == 0 {
+		return serviceIDs
+	}
 	filterService = tagsFilter(services, tags)
 	filterService = accessibleFilter(ctx, consumerID, filterService)
 	for _, service := range filterService {
@@ -2566,6 +2667,9 @@ func filterServiceIDs(ctx context.Context, consumerID string, tags []string, ser
 }
 
 func tagsFilter(services []*Service, tags []string) []*Service {
+	if len(tags) == 0 {
+		return services
+	}
 	var newServices []*Service
 	for _, service := range services {
 		index := 0
@@ -2643,9 +2747,9 @@ func latestServicesFilter(ctx context.Context, filter bson.M) ([]*Service, error
 
 func getTags(ctx context.Context, domain string, project string, serviceID string) (tags map[string]string, err error) {
 	filter := bson.M{
-		ColumnDomain:    domain,
-		ColumnProject:   project,
-		ColumnServiceID: serviceID,
+		ColumnDomain:  domain,
+		ColumnProject: project,
+		StringBuilder([]string{ColumnServiceInfo, ColumnServiceID}): serviceID,
 	}
 	result, err := client.GetMongoClient().FindOne(ctx, CollectionService, filter)
 	if err != nil {
@@ -2727,10 +2831,10 @@ func accessible(ctx context.Context, consumerID string, providerID string) *disc
 	if err != nil {
 		return discovery.NewError(discovery.ErrInternal, fmt.Sprintf("an error occurred in query consumer tags(%s)", err.Error()))
 	}
-	return matchRules(rules, consumerService.ServiceInfo, validateTags)
+	return MatchRules(rules, consumerService.ServiceInfo, validateTags)
 }
 
-func matchRules(rulesOfProvider []*Rule, consumer *discovery.MicroService, tagsOfConsumer map[string]string) *discovery.Error {
+func MatchRules(rulesOfProvider []*Rule, consumer *discovery.MicroService, tagsOfConsumer map[string]string) *discovery.Error {
 	if consumer == nil {
 		return discovery.NewError(discovery.ErrInvalidParams, "consumer is nil")
 	}
@@ -2816,22 +2920,23 @@ func getRulesUtil(ctx context.Context, domain string, project string, serviceID 
 		ColumnProject:   project,
 		ColumnServiceID: serviceID,
 	}
-	resp, err := client.GetMongoClient().Find(ctx, CollectionRule, filter)
+	cursor, err := client.GetMongoClient().Find(ctx, CollectionRule, filter)
 	if err != nil {
 		return nil, err
 	}
-	if resp.Err() != nil {
-		return nil, resp.Err()
+	if cursor.Err() != nil {
+		return nil, cursor.Err()
 	}
 	var rules []*Rule
-	for resp.Next(ctx) {
-		var rule *Rule
-		err := resp.Decode(rule)
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var rule Rule
+		err := cursor.Decode(&rule)
 		if err != nil {
 			log.Error("type conversion error", err)
 			return nil, err
 		}
-		rules = append(rules, rule)
+		rules = append(rules, &rule)
 	}
 	return rules, nil
 }
@@ -2948,7 +3053,7 @@ func GetInstancesByServiceID(ctx context.Context, serviceID string) ([]*discover
 		}
 		res = append(res, inst.InstanceInfo)
 	}
-	if cacheUnavailable {
+	if cacheUnavailable || len(res) == 0 {
 		res, err := instancesFilter(ctx, []string{serviceID})
 		if err != nil {
 			return nil, err
@@ -2968,4 +3073,20 @@ func DeleteDependencyForDeleteService(domainProject string, serviceID string, se
 		return err
 	}
 	return nil
+}
+
+func formatRevision(consumerServiceId string, instances []*discovery.MicroServiceInstance) (string, error) {
+	if instances == nil {
+		return fmt.Sprintf("%x", sha1.Sum(util.StringToBytesWithNoCopy(consumerServiceId))), nil
+	}
+	copyInstance := make([]*discovery.MicroServiceInstance, len(instances))
+	copy(copyInstance, instances)
+	sort.Sort(InstanceSlice(copyInstance))
+	data, err := json.Marshal(copyInstance)
+	if err != nil {
+		log.Error("fail to marshal instance json", err)
+		return "", err
+	}
+	s := fmt.Sprintf("%s.%x", consumerServiceId, sha1.Sum(data))
+	return fmt.Sprintf("%x", sha1.Sum(util.StringToBytesWithNoCopy(s))), nil
 }
