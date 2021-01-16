@@ -17,15 +17,19 @@
 package service_test
 
 import (
-	"strconv"
+	//"fmt"
+	//"strconv"
 
+	"fmt"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/event"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	pb "github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/go-archaius"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"strconv"
 )
 
 var deh event.DependencyEventHandler
@@ -37,7 +41,7 @@ var _ = Describe("'Dependency' service", func() {
 			consumerId2 string
 			consumerId3 string
 		)
-
+		fmt.Println(consumerId3)
 		It("should be passed", func() {
 			respCreateService, err := serviceResource.Create(getContext(), &pb.CreateServiceRequest{
 				Service: &pb.MicroService{
@@ -455,7 +459,7 @@ var _ = Describe("'Dependency' service", func() {
 				Expect(err).To(BeNil())
 				Expect(respPro.Response.GetCode()).To(Equal(pb.ResponseSuccess))
 				Expect(len(respPro.Providers)).To(Equal(2))
-
+				//
 				By("add *")
 				respCreateDependency, err = serviceResource.CreateDependenciesForMicroServices(getContext(), &pb.CreateDependenciesRequest{
 					Dependencies: []*pb.ConsumerDependency{
@@ -500,7 +504,7 @@ var _ = Describe("'Dependency' service", func() {
 				})
 				Expect(err).To(BeNil())
 				Expect(respCreateDependency.Response.GetCode()).To(Equal(pb.ResponseSuccess))
-
+				//
 				By("add multiple providers")
 				respCreateDependency, err = serviceResource.CreateDependenciesForMicroServices(getContext(), &pb.CreateDependenciesRequest{
 					Dependencies: []*pb.ConsumerDependency{
@@ -576,8 +580,8 @@ var _ = Describe("'Dependency' service", func() {
 				Expect(err).To(BeNil())
 				Expect(respPro.Response.GetCode()).To(Equal(pb.ResponseSuccess))
 				Expect(len(respPro.Providers)).To(Equal(2))
-
-				By("add provider is empty")
+				//
+				//			By("add provider is empty")
 				respCreateDependency, err = serviceResource.CreateDependenciesForMicroServices(getContext(), &pb.CreateDependenciesRequest{
 					Dependencies: []*pb.ConsumerDependency{
 						{
@@ -616,7 +620,7 @@ var _ = Describe("'Dependency' service", func() {
 			providerId1 string
 			providerId2 string
 		)
-
+		fmt.Println(consumerId1, providerId1, providerId2)
 		It("should be passed", func() {
 			respCreateService, err := serviceResource.Create(getContext(), &pb.CreateServiceRequest{
 				Service: &pb.MicroService{
@@ -657,7 +661,7 @@ var _ = Describe("'Dependency' service", func() {
 			Expect(respCreateService.Response.GetCode()).To(Equal(pb.ResponseSuccess))
 			providerId2 = respCreateService.ServiceId
 		})
-
+		//
 		Context("when request is invalid", func() {
 			It("should be failed", func() {
 				By("service id is empty when get provider")
@@ -707,7 +711,7 @@ var _ = Describe("'Dependency' service", func() {
 				Expect(respCon.Response.GetCode()).To(Equal(pb.ResponseSuccess))
 			})
 		})
-
+		//
 		Context("when after finding instance", func() {
 			It("should created dependencies between C and P", func() {
 				By("find provider")
@@ -750,7 +754,7 @@ var _ = Describe("'Dependency' service", func() {
 				Expect(resp.Response.GetCode()).To(Equal(pb.ResponseSuccess))
 
 				DependencyHandle()
-
+				fmt.Println("panqian---get consumer again")
 				By("get consumer again")
 				respGetP, err = serviceResource.GetProviderDependencies(getContext(), &pb.GetDependenciesRequest{
 					ServiceId: providerId1,
@@ -883,18 +887,24 @@ var _ = Describe("'Dependency' service", func() {
 })
 
 func DependencyHandle() {
-	for {
-		Expect(deh.Handle()).To(BeNil())
+	t := archaius.Get("TEST_MODE")
+	if t == nil {
+		t = "etcd"
+	}
+	if t == "etcd" {
+		for {
+			Expect(deh.Handle()).To(BeNil())
 
-		key := path.GetServiceDependencyQueueRootKey("")
-		resp, err := kv.Store().DependencyQueue().Search(getContext(),
-			client.WithStrKey(key), client.WithPrefix(), client.WithCountOnly())
+			key := path.GetServiceDependencyQueueRootKey("")
+			resp, err := kv.Store().DependencyQueue().Search(getContext(),
+				client.WithStrKey(key), client.WithPrefix(), client.WithCountOnly())
 
-		Expect(err).To(BeNil())
+			Expect(err).To(BeNil())
 
-		// maintain dependency rules.
-		if resp.Count == 0 {
-			break
+			// maintain dependency rules.
+			if resp.Count == 0 {
+				break
+			}
 		}
 	}
 }
