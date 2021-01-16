@@ -50,35 +50,37 @@ const (
 )
 
 const (
-	ColumnDomain         = "domain"
-	ColumnProject        = "project"
-	ColumnTag            = "tags"
-	ColumnSchemaID       = "schemaid"
-	ColumnServiceID      = "serviceid"
-	ColumnRuleID         = "ruleid"
-	ColumnServiceInfo    = "serviceinfo"
-	ColumnProperty       = "properties"
-	ColumnModTime        = "modtimestamp"
-	ColumnEnv            = "environment"
-	ColumnAppID          = "appid"
-	ColumnServiceName    = "servicename"
-	ColumnAlias          = "alias"
-	ColumnVersion        = "version"
-	ColumnSchemas        = "schemas"
-	ColumnAttribute      = "attribute"
-	ColumnPattern        = "pattern"
-	ColumnDescription    = "description"
-	ColumnRuleType       = "ruletype"
-	ColumnSchemaInfo     = "schemainfo"
-	ColumnSchemaSummary  = "schemasummary"
-	ColumnConsumer       = "consumer"
-	ColumnDependencyInfo = "dependencyinfo"
-	ColumnRuleInfo       = "ruleinfo"
-	ColumnInstanceInfo   = "instanceinfo"
-	ColumnInstanceID     = "instanceid"
-	ColumnConsumerID     = "consumerid"
-	ColumnMongoID        = "_id"
-	ColumnTenant         = "tenant"
+	ColumnDomain        = "domain"
+	ColumnProject       = "project"
+	ColumnTag           = "tags"
+	ColumnSchemaID      = "schemaid"
+	ColumnServiceID     = "serviceid"
+	ColumnRuleID        = "ruleid"
+	ColumnServiceInfo   = "serviceinfo"
+	ColumnProperty      = "properties"
+	ColumnModTime       = "modtimestamp"
+	ColumnEnv           = "environment"
+	ColumnAppID         = "appid"
+	ColumnServiceName   = "servicename"
+	ColumnAlias         = "alias"
+	ColumnVersion       = "version"
+	ColumnSchemas       = "schemas"
+	ColumnAttribute     = "attribute"
+	ColumnPattern       = "pattern"
+	ColumnDescription   = "description"
+	ColumnRuleType      = "ruletype"
+	ColumnSchemaInfo    = "schemainfo"
+	ColumnSchemaSummary = "schemasummary"
+	ColumnDepInfo       = "depinfo"
+	ColumnDependency    = "dependency"
+	ColumnRuleInfo      = "ruleinfo"
+	ColumnInstanceInfo  = "instanceinfo"
+	ColumnInstanceID    = "instanceid"
+	ColumnConsumerID    = "consumerid"
+	ColumnMongoID       = "_id"
+	ColumnTenant        = "tenant"
+	ColumnServiceType   = "type"
+	ColumnServiceKey    = "servicekey"
 )
 
 type Service struct {
@@ -111,10 +113,23 @@ type Instance struct {
 	InstanceInfo *pb.MicroServiceInstance
 }
 
-type Dependency struct {
-	Domain         string
-	Project        string
-	ConsumerID     string
-	UUID           string
-	DependencyInfo *pb.ConsumerDependency
+type ConsumerDep struct {
+	Domain          string
+	Project         string
+	ConsumerID      string
+	UUID            string
+	ConsumerDepInfo *pb.ConsumerDependency
+}
+
+type DependencyRule struct {
+	Type       string
+	Domain     string
+	Project    string
+	ServiceKey *pb.MicroServiceKey
+	DepInfo    *pb.MicroServiceDependency
+}
+
+type DelDepCacheKey struct {
+	key  *pb.MicroServiceKey
+	Type string
 }
